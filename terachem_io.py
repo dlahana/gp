@@ -1,6 +1,4 @@
 import numpy as np
-import sys
-import os
 
 def get_energy(path: str, method: str) -> float:
 
