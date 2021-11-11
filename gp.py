@@ -26,14 +26,24 @@ class GP():
         self.data_points = 0
         try:
             self.get_starting_geom(os.path.join(self.path, self.geom))
-        except OSError:
-            raise "Ya done fucked up\n"
+        except FileNotFoundError:
+            print(f'Geometry file {self.geom} not found')
+            print('GP exiting')
+            exit()
         if self.engine == "tc":
             import terachem_io as tcio
         self.current_x = np.zeros(3 * self.n)
-        #terachem = os.environ['TeraChem']
-        #print(terachem)
-        print(self.X)
+        try:
+            terachem = os.environ['TeraChem']
+            print("TeraChem: " + terachem)
+        except KeyError:
+            print("No terachem module loaded\n")
+            print('GP exiting')
+            exit()
+        self.E_p = 1.0 # replace this with value from first energy evaluation
+        self.U_p = np.zeros(3 * self.n + 1)
+        self.U_p[0] = self.E_p
+        #print(self.X)
     
 
     def get_starting_geom(self, geom_file: str):
@@ -47,7 +57,8 @@ class GP():
             x[3 * i + 0] = parsed[1]
             x[3 * i + 1] = parsed[2]
             x[3 * i + 2] = parsed[3]
-        self.X = x
+        self.X = np.array(x)
+        self.X = np.reshape(self.X, (3 * self.n, 1))
 
         return 
 
@@ -74,6 +85,8 @@ class GP():
         self.k_xX = np.zeros((self.data_points * (3 * self.n + 1), 3 * self.n + 1))
         for i in range(self.data_points):
             self.k_xX[(3 * self.n + 1) * i: (3 * self.n + 1) * (i + 1), :] = self.build_K_xx(x, self.X[i, :]) 
+        
+        return
 
     def build_K_XX(self):
         # dimension (p x p)
@@ -97,25 +110,28 @@ class GP():
         # do this with function pointers or similar later?
         # set k, J, H functions in __init__?
         if (self.kernel == "squared_exponential"):
-            self.k = k.squared_exponential(self.n, x_i, x_j, self.l)
-
-        return
+            return k.squared_exponential(self.n, x_i, x_j, self.l, self.sigma_f)
+        else:
+            return
 
 
     def calc_J(self, x_i, x_j):
         # wrapper for covariance function first derivative
         if (self.kernel == "squared_exponential"):
-            return k.d_squared_exponential(self.n, x_i, x_j, self.l)
-        
-        return
+            return k.d_squared_exponential(self.n, x_i, x_j, self.l, self.sigma_f)
+        else:
+            return
     
     def calc_H(self, x_i, x_j):
         # wrapper for covariance function second derivative
         if (self.kernel == "squared_exponential"):
-            self.H = k.d_d_squared_exponential(self.n, x_i, x_j, self.l)
-        
-        return
+            return k.d_d_squared_exponential(self.n, x_i, x_j, self.l, self.sigma_f)
+        else:
+            return
 
+    def update_U_p(self):
+        self.U_p[0] = self.E_p
+        return
 
     def calc_U_mean(self):
         return
@@ -129,8 +145,11 @@ class GP():
     def minimize(self):
         return
 
+    def do_stuff(self):
+        k = self.calc_k(self.X[0,:], self.X[0,:] - np.ones(3 * self.n))
+        print(k)
+        return
 
-gp = GP("ethylene_brs.xyz", "squared_exponential", "tc", path="./gradient_examples/FOMO_CASCI/")
-#v_1 = gp.read_energy_gradient(6, "/home/dlahana/projects/gp/gradient_examples/FOMO_CASCI/out_1109_1251", method="hf")
-#v_1 = gp.read_energy_gradient(6, "/home/dlahana/projects/gp/gradient_examples/FOMO_CASCI/out_1110_1528", method="hf")
-#k.build_K(1,)
+
+gp = GP("ethylene_brs4.xyz", "squared_exponential", "tc", path="./gradient_examples/FOMO_CASCI/")
+gp.do_stuff()

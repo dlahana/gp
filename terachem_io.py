@@ -1,6 +1,7 @@
 import numpy as np
+import subprocess
 
-def get_energy(path: str, method: str) -> float:
+def read_energy(path: str, method: str) -> float:
 
     f = open(path)
     lines = f.readlines()
@@ -42,13 +43,18 @@ def read_geom(n: int, x, path:str, name: str):
 
 
 def write_geom(n: int, x, path:str, name: str):
-
     f = open(os.path.join(path, name), "w")
     f.write(str(n) + "\n\n")
     for i in range(n):
         f.write("%f %f %f\n", x[3 * i + 0], x[3 * i + 1], x[3 * i + 2])
     f.close()
     
+    return
+
+
+def launch_job():
+    command_str = "terachem start > out"
+    subprocess.run(command_str)
     return
 
 
