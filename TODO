@@ -1,0 +1,4 @@
+calculate second derivative of squared exponential kernel
+implement second derivative
+test kernel functions and all other functions/array dimensions by providing a second arbitrary geometry
+use scipy's lbfgs
