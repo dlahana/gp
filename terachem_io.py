@@ -12,7 +12,7 @@ def get_energy(path: str, method: str) -> float:
     return energy
 
 
-def get_energy_gradient(n: int, path: str, method: str):
+def read_energy_gradient(n: int, path: str, method: str = "hf"):
 
     f = open(path)
     lines = f.readlines()
@@ -30,6 +30,17 @@ def get_energy_gradient(n: int, path: str, method: str):
     return data
 
 
+def read_geom(n: int, x, path:str, name: str):
+
+    f = open(os.path.join(path, name), "r")
+    
+    for i in range(n):
+        f.write("%f %f %f\n", x[3 * i + 0], x[3 * i + 1], x[3 * i + 2])
+    f.close()
+    
+    return
+
+
 def write_geom(n: int, x, path:str, name: str):
 
     f = open(os.path.join(path, name), "w")
@@ -37,7 +48,6 @@ def write_geom(n: int, x, path:str, name: str):
     for i in range(n):
         f.write("%f %f %f\n", x[3 * i + 0], x[3 * i + 1], x[3 * i + 2])
     f.close()
-
     
     return
 
