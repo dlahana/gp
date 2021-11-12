@@ -24,6 +24,7 @@ class GP():
         self.atoms = []
         self.add_noise = True
         self.data_points = 0
+        self.E_p = 0.0
         try:
             self.get_starting_geom(os.path.join(self.path, self.geom))
         except FileNotFoundError:
@@ -40,10 +41,7 @@ class GP():
             print("No terachem module loaded\n")
             print('GP exiting')
             exit()
-        self.E_p = 1.0 # replace this with value from first energy evaluation
-        self.U_p = np.zeros(3 * self.n + 1)
-        self.U_p[0] = self.E_p
-        #print(self.X)
+        self.U_p = np.zeros(3 * self.n + 1) # update first element (E_p) when loop starts and first energy is evaluated
     
 
     def get_starting_geom(self, geom_file: str):
@@ -139,10 +137,25 @@ class GP():
     def calc_U_variance(self):
         return
 
-    def update_prior(self):
-        return
-
     def minimize(self):
+        tol = 1.0e-4
+        # get initial energy and gradient
+        # set E_p = E_0
+        # while ||f_0||_\inf > tol:
+        #   add x to X
+        #   add E_0 and f_0 to Y
+        #   set E_p = E_max
+        #   find x_min for SPES using scipy lbfgs
+        #   calculate E_1 and f_1 (actual quantum values at x_min)
+        #   while E_1 > E_0: (I guess if SPES minimizer is greater than starting point on PES)
+        #       add x_min to to X
+        #       add E_1 and f_1 to Y
+        #       set E_p = E_max
+        #       find x_min for SPES using scipy lbfgs
+        #       calculate E_1 and f_1 (actual quantum values at x_min)
+        #       if ||f_1||_\ing > tol:
+        #           break
+        # x_0, E_0, f_0 <- x_1, E_1, f_1
         return
 
     def do_stuff(self):
@@ -151,5 +164,5 @@ class GP():
         return
 
 
-gp = GP("ethylene_brs4.xyz", "squared_exponential", "tc", path="./gradient_examples/FOMO_CASCI/")
+gp = GP("ethylene_brs.xyz", "squared_exponential", "tc", path="./gradient_examples/FOMO_CASCI/")
 gp.do_stuff()
