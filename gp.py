@@ -9,7 +9,7 @@ class GP():
                 kernel: str, 
                 engine: str,
                 path: str = os.getcwd(),
-                l: float = 0.3, 
+                l: float = 10.3, 
                 sigma_f: float = 0.1,
                 sigma_n: float = 0.0002,
                 add_noise: bool = True):
@@ -159,8 +159,18 @@ class GP():
         return
 
     def do_stuff(self):
-        k = self.calc_k(self.X[0,:], self.X[0,:] - np.ones(3 * self.n))
+        bogus_x = np.zeros(3 * self.n)
+        for i in range(3 * self.n):
+            noise = np.random.rand()
+            if np.random.rand() > 0.5:
+                noise = 0.0 + noise
+            else:
+                noise = 0.0 - noise
+            bogus_x[i] = self.X[i,0] + noise
+        k = self.calc_k(self.X[0,:], bogus_x)
         print(k)
+        J = self.calc_J(self.X[0,:], bogus_x)
+        print(J)
         return
 
 
