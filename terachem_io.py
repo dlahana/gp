@@ -1,5 +1,6 @@
 import numpy as np
 import subprocess
+import os
 
 def read_energy(path: str, method: str) -> float:
 
@@ -31,30 +32,37 @@ def read_energy_gradient(n: int, path: str, method: str = "hf"):
     return data
 
 
-def read_geom(n: int, x, path:str, name: str):
-
-    f = open(os.path.join(path, name), "r")
-    
+def read_geom(n: int, path:str, name: str):
+    geom_file = os.path.join(path, name)
+    infile = open(geom_file, "r")
+    x = np.zeros(3 * n)
+    infile.readline()
+    infile.readline()
     for i in range(n):
-        f.write("%f %f %f\n", x[3 * i + 0], x[3 * i + 1], x[3 * i + 2])
-    f.close()
-    
-    return
+        parsed = infile.readline().strip().split()
+        x[3 * i + 0] = float(parsed[1])
+        x[3 * i + 1] = float(parsed[2])
+        x[3 * i + 2] = float(parsed[3])
+    return x
 
 
-def write_geom(n: int, x, path:str, name: str):
+def write_geom(n: int, atoms, x, path:str, name: str):
     f = open(os.path.join(path, name), "w")
     f.write(str(n) + "\n\n")
     for i in range(n):
-        f.write("%f %f %f\n", x[3 * i + 0], x[3 * i + 1], x[3 * i + 2])
+        f.write("%s %f %f %f\n" % (atoms[i], x[3 * i + 0], x[3 * i + 1], x[3 * i + 2]))
     f.close()
     
     return
 
 
-def launch_job():
-    command_str = "terachem start > out"
-    subprocess.run(command_str)
+def launch_job(path):
+    command = ["terachem", "start", ">", "out"]
+    print("started job")
+    out = open("out","w")
+    subprocess.run(command, stdout=out)
+    out.close()
+    print("ended job")
     return
 
 

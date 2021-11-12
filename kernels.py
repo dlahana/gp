@@ -7,10 +7,22 @@ def squared_exponential(n: int, x_i, x_j, l = 1.0, sigma = 1.0):
 
 def d_squared_exponential(n: int, x_i, x_j, l = 1.0, sigma = 1.0):
     term1 = -((np.linalg.norm(x_i - x_j))**2) / (2 * l**2)
-    term2 = sigma * np.exp(term1)
+    term2 = sigma**2 * np.exp(term1)
     term3 = (x_j - x_i) / l**2
     return term1 * term2 * term3
 
 def d_d_squared_exponential(n: int, x_i, x_j, l = 1.0, sigma = 1.0):
-    return
+    # can make this faster by only doing the upper triangle, or by using real matrix operations
+    H = np.zeros((3 * n, 3 * n))
+    for i in range(3 * n):
+        for j in range(3 * n):
+            term1 = x_i[i] - x_j[i]
+            term2 = (x_j[j] - x_i[j]) / (l**2)
+            term3 = -((np.linalg.norm(x_i - x_j))**2) / (2 * l**2)
+            term4 = np.exp(term3)
+            H[i,j] = term1 * term2 * term4
+            if i == j:
+                H[i,j] += term4
+
+    return H
 
