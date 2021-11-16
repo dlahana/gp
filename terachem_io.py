@@ -32,8 +32,7 @@ def read_energy_gradient(n: int, path: str, method: str = "hf"):
     return data
 
 
-def read_geom(n: int, path:str, name: str):
-    geom_file = os.path.join(path, name)
+def read_geom(n: int, geom_file: str):
     infile = open(geom_file, "r")
     x = np.zeros(3 * n)
     infile.readline()
@@ -46,8 +45,8 @@ def read_geom(n: int, path:str, name: str):
     return x
 
 
-def write_geom(n: int, atoms, x, path:str, name: str):
-    f = open(os.path.join(path, name), "w")
+def write_geom(n: int, atoms, x, geom_file: str):
+    f = open(geom_file, "w")
     f.write(str(n) + "\n\n")
     for i in range(n):
         f.write("%s %f %f %f\n" % (atoms[i], x[3 * i + 0], x[3 * i + 1], x[3 * i + 2]))

@@ -2,6 +2,7 @@ import numpy as np
 import kernels as k
 import terachem_io as tcio # how to make this conditional?
 import os
+from scipy.optimize import minimize
 
 class GP():
 
@@ -15,10 +16,10 @@ class GP():
                 sigma_n: float = 0.0002,
                 add_noise: bool = True):
         
-        self.geom = geom
         self.kernel = kernel
         self.engine = engine
         self.path = path
+        self.geom_file = os.path.join(self.path, geom)
         self.l = l
         self.sigma_f = sigma_f
         self.sigma_n = sigma_n
@@ -28,10 +29,11 @@ class GP():
         self.E_p = 0.0
         self.X = []
         self.iteration = 0
+        self.K_inv = None
         try:
-            self.get_atoms(os.path.join(self.path, self.geom))
+            self.get_atoms_from_initial_geom()
         except FileNotFoundError:
-            print(f'Geometry file {self.geom} not found')
+            print(f'Geometry file {self.geom_file} not found')
             print('GP exiting')
             exit()
         if self.engine == "tc":
@@ -48,9 +50,8 @@ class GP():
         self.U_p = np.zeros(3 * self.n + 1) # update first element (E_p) when loop starts and first energy is evaluated
     
 
-    def get_atoms(self, geom_file: str):
-        infile = open(geom_file, "r")
-        print(geom_file)
+    def get_atoms_from_initial_geom(self):
+        infile = open(self.geom_file, "r")
         self.n = int(infile.readline())
         print("n = %d" % self.n)
         infile.readline()
@@ -60,7 +61,6 @@ class GP():
             self.atoms.append(parsed[0])
         infile.close()
         return 
-
 
     def read_energy_gradient(self): 
         if (self.engine == "tc"):
@@ -93,11 +93,13 @@ class GP():
         self.K_XX[self.data_points * (3 * self.n + 1):, 0:self.data_points * (3 * self.n +1)] = self.k_xX
         self.K_XX[0:self.data_points * (3 * self.n + 1), self.data_points * (3 * self.n +1):] = np.transpose(self.k_xX)
         self.K_XX[self.data_points * (3 * self.n + 1):, self.data_points * (3 * self.n + 1):] = self.k_xx(self.current_x, self.current_x)
+        # should this matrix include data from current iterate? can check dimensionality
         # can I use sherman-morrison-woodsbury update to K^-1?
         # perhaps if I throw away some data to keep matrix size consistent
         return 
 
-    def invert_K_X(self):
+    def calc_K_X_inv(self):
+        # add timer
         self.K_inv = np.linalg.inv(self.K_XX)
         return
 
@@ -125,6 +127,7 @@ class GP():
             return
 
     def update_U_p(self):
+        self.U_p = np.zeros(self.iteration * (3 * n + 1))
         for i in range(self.iteration):
             self.U_p[i * (3 * n + 1)] = self.E_p
         return
@@ -141,8 +144,11 @@ class GP():
         return inf_norm
 
     def calc_U_mean(self, x):
-        #U = 
-        return
+        self.build_K_xX(x)
+        self.build_K_XX() # this seems to only append onto full matrix, not rebuild, which is good
+        self.calc_K_X_inv()
+        U_x = self.U_p[0:3 * n + 1] + np.matmul(np.matmul(np.transpose(self.K_xX), self.K_X_inv), self.Y - self.U_p)
+        return (U_x[0], U_x[1:])
 
     def calc_U_variance(self):
         return
@@ -158,18 +164,24 @@ class GP():
         self.Y = np.array([])
         self.energies = []
         while inf_norm > tol:
-            x = tcio.read_geom(self.n, self.path, self.geom)
+            x = tcio.read_geom(self.n, self.geom_file)
             if self.iteration == 0:
                 self.X = np.reshape(x, (3 * self.n, 1))
             else:
                 self.X = np.append(self.X, x)
+                print(self.X)
             self.Y = np.append(np.array(self.Y), data)
             self.energies.append(data[0])
             self.set_new_E_p()
             self.update_U_p()
-        #   find x_min for SPES using scipy lbfgs
-        #   calculate E_1 and f_1 (actual quantum values at x_min)
-            tcio.write_geom(self.n, self.atoms, x, self.path, self.geom)
+            res = minimize(self.calc_U_mean(), self.current_x, jac=True, method='BFGS') # may need to pass function arguments explicitly,
+            if res.success==False:
+                print("SPES optimization failed with following status message:")
+                print(res.message)
+                exit()
+            self.current_x = res.x # 
+            tcio.write_geom(self.n, self.atoms, self.current_x, self.geom_file)
+            # dont know if minimize has acccess to all class variables
             tcio.launch_job(self.path)  
             data1 = tcio.read_energy_gradient(self.n, 'out')
             while data1[0] > data[0]: #(I guess if SPES minimizer is greater than starting point on PES)
@@ -178,13 +190,21 @@ class GP():
                 self.energies.append(data1[0])
                 self.set_new_E_p()
                 self.update_U_p()
-        #       find x_min for SPES using scipy lbfgs
-        #       calculate E_1 and f_1 (actual quantum values at x_min)
+                res = minimize(self.calc_U_mean(), self.current_x, jac=True, method='BFGS') # may need to pass function arguments explicitly,
+                if res.success==False:
+                    print("SPES optimization failed with following status message:")
+                    print(res.message)
+                    exit()
+                self.current_x = res.x # 
+                tcio.write_geom(self.n, self.atoms, self.current_x, self.geom_file)
+                tcio.launch_job(self.path)  
         #       if ||f_1||_\ing > tol:
         #           break
-        # x_0, E_0, f_0 <- x_1, E_1, f_1
-                data[0] = 100000
-            inf_norm = 0.0
+                data1 = tcio.read_energy_gradient(self.n, 'out')
+                inf_norm = self.calc_inf_norm(data1[1:])
+                #data[0] = 100000
+            data = data1
+            print(inf_norm)
         return
 
     def do_stuff(self):
