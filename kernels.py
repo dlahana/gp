@@ -3,13 +3,14 @@ import numpy as np
 
 # passing vector length is c style, merits vs len()?
 def squared_exponential(n: int, x_i, x_j, l = 1.0, sigma = 1.0):
-    return sigma * np.exp((-(np.linalg.norm(x_i - x_j))**2) / (2 * l**2))
+    #print(x_i)
+    return sigma * np.exp(-((np.linalg.norm(x_i - x_j))**2) / (2 * l**2))
 
 def d_squared_exponential(n: int, x_i, x_j, l = 1.0, sigma = 1.0):
     term1 = -((np.linalg.norm(x_i - x_j))**2) / (2 * l**2)
     term2 = sigma**2 * np.exp(term1)
-    term3 = (x_j - x_i) / l**2
-    return term1 * term2 * term3
+    term3 = (x_i - x_j) / l**2 #confirm order of i and j
+    return term2 * term3
 
 def d_d_squared_exponential(n: int, x_i, x_j, l = 1.0, sigma = 1.0):
     # can make this faster by only doing the upper triangle, or by using real matrix operations
@@ -23,6 +24,7 @@ def d_d_squared_exponential(n: int, x_i, x_j, l = 1.0, sigma = 1.0):
             H[i,j] = term1 * term2 * term4
             if i == j:
                 H[i,j] += term4
+            H[i,j] *= ((sigma**2) / (l**2))
 
     return H
 

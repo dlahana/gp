@@ -45,8 +45,8 @@ def read_geom(n: int, geom_file: str):
     return x
 
 
-def write_geom(n: int, atoms, x, geom_file: str):
-    f = open(geom_file, "w")
+def write_geom(n: int, atoms, x, geom_file: str, mode: str="w"):
+    f = open(geom_file, mode)
     f.write(str(n) + "\n\n")
     for i in range(n):
         f.write("%s %f %f %f\n" % (atoms[i], x[3 * i + 0], x[3 * i + 1], x[3 * i + 2]))
