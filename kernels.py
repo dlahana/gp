@@ -1,5 +1,6 @@
 # various covariance kernels will go here
 import numpy as np
+from scipy.spatial.distance import cdist as cdist
 
 # passing vector length is c style, merits vs len()?
 def squared_exponential(n: int, x_i, x_j, l = 1.0, sigma = 1.0):

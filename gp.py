@@ -1,3 +1,4 @@
+#!/global/software/Anaconda3/2019.07/bin/python3
 import numpy as np
 import kernels as k
 import terachem_io as tcio # how to make this conditional?
@@ -10,6 +11,7 @@ class GP():
                 geom: str,
                 kernel: str, 
                 engine: str,
+                elec_struct_out: str = "out",
                 path: str = os.getcwd(),
                 l: float = 0.6, 
                 sigma_f: float = 0.1,
@@ -18,8 +20,9 @@ class GP():
         
         self.kernel = kernel
         self.engine = engine
+        self.elec_struct_out = elec_struct_out
         self.path = path
-        self.geom_file = os.path.join(self.path, geom)
+        self.geom_file = geom
         self.l = l
         self.sigma_f = sigma_f
         self.sigma_n = sigma_n
@@ -65,7 +68,7 @@ class GP():
 
     def read_energy_gradient(self): 
         if (self.engine == "tc"):
-            data = tcio.read_energy_gradient(self.n, os.path.join(self.path,"out"), method="hf")
+            data = tcio.read_energy_gradient(self.n, self.elec_struct_out, method="hf")
         return data
 
     def build_k_xx(self, x_i, x_j):
@@ -76,11 +79,14 @@ class GP():
         k_xx[1:,1:] = self.calc_H(x_i, x_j)
         #if self.add_noise == True:
             #construct \Sigma_n^2 (size of K(X,X))
+        print(k_xx)
         return k_xx
 
     def build_K_xX(self, x):
-        # used for evaluating the kernel distance of the current 
-        # geometry from all previously encountered geometries 
+        '''
+        used for evaluating the kernel distance of the current 
+        geometry from all previously encountered geometries 
+        '''
         dim = 3 * self.n + 1
         self.k_xX = np.zeros((self.data_points * dim, dim))
         for i in range(self.data_points):
@@ -99,34 +105,45 @@ class GP():
             for i in range(self.data_points):
                 K_XX[dim_prev:dim_full, i*dim:i*dim+dim] = self.build_k_xx(self.X[:,i], self.X[:,-1])
                 K_XX[i*dim:i*dim+dim, dim_prev:dim_full] = K_XX[dim_prev:dim_full, i*dim:i*dim+dim]
+            if self.add_noise == True: # better to do this in build_k_xx to avoid repeating work
+                for i in range(self.data_points):
+                    K_XX[i * dim, i * dim] += (self.sigma_n**2) * (self.l**2)
+                    for j in range(3 * self.n):
+                        K_XX[i * dim + j, i * dim + j] += self.sigma_n**2
             self.K_XX = K_XX
             # can I use sherman-morrison-woodsbury update to K^-1?
             # perhaps if I throw away some data to keep matrix size consistent
         return 
 
+
     def calc_K_X_inv(self):
         # add timer
         self.K_X_inv = np.linalg.inv(self.K_XX)
+        #print(self.K_X_inv)
         return
 
     def calc_k(self, x_i, x_j):
-        # wrapper for covariance function
-        # do this with function pointers or similar later?
-        # set k, J, H functions in __init__?
+        '''
+        wrapper for covariance function
+        '''
         if (self.kernel == "squared_exponential"):
             return k.squared_exponential(self.n, x_i, x_j, self.l, self.sigma_f)
         else:
             return
 
     def calc_J(self, x_i, x_j):
-        # wrapper for covariance function first derivative
+        '''
+        wrapper for covariance function first derivative
+        '''
         if (self.kernel == "squared_exponential"):
             return k.d_squared_exponential(self.n, x_i, x_j, self.l, self.sigma_f)
         else:
             return
     
     def calc_H(self, x_i, x_j):
-        # wrapper for covariance function second derivative
+        '''
+        wrapper for covariance function second derivative
+        '''
         if (self.kernel == "squared_exponential"):
             return k.d_d_squared_exponential(self.n, x_i, x_j, self.l, self.sigma_f)
         else:
@@ -150,14 +167,12 @@ class GP():
         return inf_norm
 
     def calc_U_mean(self, x):
-        #print("bfgs x")
-        #print(x)
         self.build_K_xX(x)
         U_x = self.U_p[0:3 * self.n + 1] + np.matmul(np.matmul(np.transpose(self.k_xX), self.K_X_inv), self.Y - self.U_p)
-        print(U_x[1:])
-        print(U_x[0])
-        #return (U_x[0], U_x[1:])
+        #print(U_x[0])
+        #print(U_x[1:])
         return U_x[0]
+        #return U_x
 
     def calc_U_variance(self):
         return
@@ -165,10 +180,12 @@ class GP():
     def minimize(self):
         tol = 1.0e-4
         # get initial energy and gradient
-        tcio.launch_job(self.path)
+        tcio.launch_job(self.elec_struct_out, self.data_points+1)
         self.data_points += 1
-        data = tcio.read_energy_gradient(self.n, 'out')
+        data = self.read_energy_gradient()
         self.E_p = data[0]
+        print(f'Initial energy: {self.E_p}')
+        print(f'Initial graident:\n{data[1:]}')
         self.update_U_p()
         inf_norm = self.calc_inf_norm(data[1:])
         self.Y = np.array([])
@@ -192,13 +209,16 @@ class GP():
                 print("SPES optimization failed with following status message:")
                 print(res.message)
                 exit()
+            #print(res.fun)
+            #print(res.jac)
             self.current_x = res.x 
             tcio.write_geom(self.n, self.atoms, self.current_x, self.geom_file)
             tcio.write_geom(self.n, self.atoms, self.current_x, "optim.xyz", mode="a")
-            tcio.launch_job(self.path)
+            tcio.launch_job(self.elec_struct_out, self.data_points+1)
             self.data_points += 1  
-            data1 = tcio.read_energy_gradient(self.n, 'out')
+            data1 = self.read_energy_gradient()
             while data1[0] > data[0]: #(I guess if SPES minimizer is greater than starting point on PES)
+                print("entering inner loop")
                 self.X = np.append(self.X, self.current_x)
                 self.Y = np.append(np.ndarray(self.Y), data1)
                 self.energies.append(data1[0])
@@ -214,11 +234,11 @@ class GP():
                 self.current_x = res.x # 
                 tcio.write_geom(self.n, self.atoms, self.current_x, self.geom_file)
                 tcio.write_geom(self.n, self.atoms, self.current_x, "optim.xyz", mode="a")
-                tcio.launch_job(self.path)
+                tcio.launch_job(self.elec_struct_out, self.data_points+1)
                 self.data_points += 1  
         #       if ||f_1||_\inf > tol:
         #           break
-                data1 = tcio.read_energy_gradient(self.n, 'out')
+                data1 = self.read_energy_gradient()
                 inf_norm = self.calc_inf_norm(data1[1:])
                 #data[0] = 100000
             data = data1
@@ -227,11 +247,10 @@ class GP():
         return
 
     def do_stuff(self):
-     
         self.minimize()
         return
 
 
 #gp = GP("ethylene_brs.xyz", "squared_exponential", "tc", path="./gradient_examples/FOMO_CASCI/")
-gp = GP("h2.xyz", "squared_exponential", "tc", path="./h2/")
+gp = GP("h2.xyz", "squared_exponential", "tc", path="./")
 gp.do_stuff()

@@ -14,9 +14,8 @@ def read_energy(path: str, method: str) -> float:
     return energy
 
 
-def read_energy_gradient(n: int, path: str, method: str = "hf"):
-
-    f = open(path)
+def read_energy_gradient(n: int, elec_struct_out: str, method: str = "hf"):
+    f = open(elec_struct_out)
     lines = f.readlines()
     data = np.zeros(3 * n + 1)
     for index, line in enumerate(lines):
@@ -55,13 +54,13 @@ def write_geom(n: int, atoms, x, geom_file: str, mode: str="w"):
     return
 
 
-def launch_job(path):
-    command = ["terachem", "start", ">", "out"]
-    print("started job")
-    out = open("out","w")
+def launch_job(elec_struct_out: str, iter_num: int):
+    command = ["terachem", "start", ">", elec_struct_out]
+    out = open(elec_struct_out,"w")
+    print(f'Starting electronic structure calculation #{iter_num}')
     subprocess.run(command, stdout=out)
     out.close()
-    print("ended job")
+    print('Job completed')
     return
 
 
