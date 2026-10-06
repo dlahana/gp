@@ -1,0 +1,13 @@
+chem_id,name,smiles,sensitive,sensitivity_note,available
+C00001,ethanol,CCO,false,,true
+C00002,acetone,CC(C)=O,false,,true
+C00003,benzene,c1ccccc1,false,,true
+C00004,toluene,Cc1ccccc1,false,,true
+C00005,phenol,Oc1ccccc1,false,,true
+C00006,aniline,Nc1ccccc1,false,,true
+C00007,pyridine,c1ccncc1,false,,true
+C00008,acetic acid,CC(=O)O,false,,true
+C00009,caffeine,Cn1cnc2c1c(=O)n(C)c(=O)n2C,false,,true
+C00010,aspirin,CC(=O)Oc1ccccc1C(=O)O,false,,true
+C00011,ATP-analog placeholder,Nc1ncnc2c1ncn2C1OC(CO)C(O)C1O,true,store at -20C,true
+C00012,hexane,CCCCCC,false,,true
