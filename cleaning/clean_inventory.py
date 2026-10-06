@@ -21,6 +21,7 @@ import pandas as pd
 from py2opsin import py2opsin
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors, rdMolDescriptors
+from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 
 RDLogger.DisableLog("rdApp.*")
 warnings.filterwarnings("ignore")
@@ -114,6 +115,62 @@ MANUAL_SMILES = {
 }
 
 
+def match_inventory_key(mol, inv_key):
+    """Try to make `mol` agree with the InChIKey recorded in the inventory.
+
+    Returns (smiles, status, conflict_note) or None if even the connectivity differs.
+    The name often implies no stereochemistry (or different stereochemistry) than the key; the key
+    wins, and we enumerate stereoisomers of the flat structure to find the one that matches it.
+    """
+    key = inchikey_of(mol)
+    if key == inv_key:
+        return Chem.MolToSmiles(mol), "verified", ""
+    if not key or key[:14] != inv_key[:14]:
+        return None
+    flat = Chem.Mol(mol)
+    Chem.RemoveStereochemistry(flat)
+    name_had_stereo = Chem.MolToSmiles(flat) != Chem.MolToSmiles(mol)
+    if inchikey_of(flat) == inv_key:  # inventory key carries no stereo at all
+        note = "name implies stereochemistry but inventory InChIKey has none" if name_had_stereo else ""
+        return Chem.MolToSmiles(flat), "verified", note
+    opts = StereoEnumerationOptions(onlyUnassigned=False, unique=True, maxIsomers=1024)
+    for iso in EnumerateStereoisomers(flat, options=opts):
+        if inchikey_of(iso) == inv_key:
+            note = "name and inventory InChIKey disagree on stereochemistry" if name_had_stereo else ""
+            return Chem.MolToSmiles(iso), "verified", note
+    # partially specified keys (e.g. E/Z given but the chiral center left open, or vice versa)
+    for iso in EnumerateStereoisomers(flat, options=opts):
+        for part in ("centers", "bonds"):
+            m2 = Chem.Mol(iso)
+            if part == "centers":  # keep E/Z, drop chirality
+                for a in m2.GetAtoms():
+                    a.SetChiralTag(Chem.ChiralType.CHI_UNSPECIFIED)
+            else:  # keep chirality, drop E/Z
+                for b in m2.GetBonds():
+                    b.SetStereo(Chem.BondStereo.STEREONONE)
+                    b.SetBondDir(Chem.BondDir.NONE)
+            if inchikey_of(m2) == inv_key:
+                return Chem.MolToSmiles(m2), "verified", f"inventory key only partly specifies stereo ({part} not all specified)"
+    return Chem.MolToSmiles(flat), "verified_no_stereo", ""
+
+
+def _conflict(g, stereo):
+    note = g.get("stereo_conflict", "")
+    if stereo == "specific stereoisomer" and re.search(r"±|racemi|\bdl-|mixture of isomers", " ".join(g["names"]), re.I):
+        note = (note + "; " if note else "") + "name says racemic/mixture but InChIKey is a single stereoisomer"
+    return note
+
+
+def stereo_note(smiles, inchikey):
+    """Is this compound a specific stereoisomer, or stereo-unspecified (racemic/mixture/unknown)?"""
+    mol = Chem.MolFromSmiles(smiles) if smiles else None
+    if mol is None or not Chem.FindPotentialStereo(mol):
+        return ""
+    if inchikey and inchikey.split("-")[1] != "UHFFFAOYSA":
+        return "specific stereoisomer"
+    return "stereo unspecified (racemic, isomer mixture, or unknown)"
+
+
 def resolve_structures(groups):
     """Fill smiles/structure_status for each group dict (in place).
 
@@ -149,10 +206,9 @@ def resolve_structures(groups):
             if not key:
                 continue
             if g["inchikey"]:
-                if key == g["inchikey"]:
-                    g.update(smiles=Chem.MolToSmiles(mol), structure_status="verified")
-                elif key[:14] == g["inchikey"][:14]:
-                    g.update(smiles=Chem.MolToSmiles(mol), structure_status="verified_no_stereo")
+                hit = match_inventory_key(mol, g["inchikey"])
+                if hit:
+                    g.update(smiles=hit[0], structure_status=hit[1], stereo_conflict=hit[2])
             elif pass_no == 1:
                 g.update(smiles=Chem.MolToSmiles(mol), structure_status="opsin_unverified", opsin_key=key)
     for g in groups:  # pass 3: hand-written SMILES, verified against the recorded InChIKey
@@ -161,10 +217,9 @@ def resolve_structures(groups):
         for n in g["names"]:
             for cand in MANUAL_SMILES.get(n.lower(), []):
                 mol = Chem.MolFromSmiles(cand)
-                key = inchikey_of(mol) if mol else None
-                if key and key[:14] == g["inchikey"][:14]:
-                    status = "verified" if key == g["inchikey"] else "verified_no_stereo"
-                    g.update(smiles=Chem.MolToSmiles(mol), structure_status=status)
+                hit = match_inventory_key(mol, g["inchikey"]) if mol else None
+                if hit:
+                    g.update(smiles=hit[0], structure_status=hit[1], stereo_conflict=hit[2])
                     break
             if g.get("smiles"):
                 break
@@ -324,6 +379,8 @@ def main(inv_path, out_dir):
             inchikey=g["inchikey"] or g.get("opsin_key", ""),
             inchikey_source="inventory" if g["inchikey"] else ("opsin" if g.get("opsin_key") else ""),
             smiles=g["smiles"], structure_status=g["structure_status"],
+            stereo=stereo_note(g["smiles"], g["inchikey"]),
+            stereo_conflict=_conflict(g, stereo_note(g["smiles"], g["inchikey"])),
             sensitive=sensitive,
             sensitivity_note="; ".join(sorted(c for c in classes if c in SENSITIVE_CLASSES)) if sensitive else "",
             storage_classes="; ".join(sorted(classes)),
