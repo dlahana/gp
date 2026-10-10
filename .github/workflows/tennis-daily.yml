@@ -8,8 +8,8 @@ on:
       date:
         description: "Date to predict (YYYY-MM-DD, blank = today)"
         required: false
-      post:
-        description: "Post to X"
+      submit:
+        description: "Send the draft for approval (you get a text)"
         type: boolean
         default: false
 
@@ -25,10 +25,8 @@ jobs:
         working-directory: tennis
     env:
       TENNIS_API_KEY: ${{ secrets.TENNIS_API_KEY }}
-      X_API_KEY: ${{ secrets.X_API_KEY }}
-      X_API_SECRET: ${{ secrets.X_API_SECRET }}
-      X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
-      X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+      BOT_SERVER_URL: ${{ secrets.BOT_SERVER_URL }}
+      BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,19 +48,20 @@ jobs:
       - name: Refresh match data
         run: python -m tennispred download --tour ${{ matrix.tour }} --start-year 1985
 
-      - name: Predict (and post when enabled)
+      - name: Predict and submit for approval
         env:
           INPUT_DATE: ${{ inputs.date }}
-          INPUT_POST: ${{ inputs.post }}
-          POST_TO_X: ${{ vars.POST_TO_X }}
+          INPUT_SUBMIT: ${{ inputs.submit }}
+          SUBMIT_DRAFTS: ${{ vars.SUBMIT_DRAFTS }}
           EVENT: ${{ github.event_name }}
         run: |
           ARGS="--tour ${{ matrix.tour }} --fixtures api --retrain --model models/${{ matrix.tour }}.json"
           if [ -n "$INPUT_DATE" ]; then ARGS="$ARGS --date $INPUT_DATE"; fi
-          # Scheduled runs post only when the repo variable POST_TO_X is "true";
-          # manual runs post only when the "post" box is ticked.
-          if [ "$EVENT" = "schedule" ] && [ "$POST_TO_X" = "true" ]; then ARGS="$ARGS --post"; fi
-          if [ "$INPUT_POST" = "true" ]; then ARGS="$ARGS --post"; fi
+          # Nothing is ever posted from here: drafts go to the bot server, which
+          # texts you and posts only after you approve. Scheduled runs submit
+          # when the repo variable SUBMIT_DRAFTS is "true"; manual runs when ticked.
+          if [ "$EVENT" = "schedule" ] && [ "$SUBMIT_DRAFTS" = "true" ]; then ARGS="$ARGS --submit"; fi
+          if [ "$INPUT_SUBMIT" = "true" ]; then ARGS="$ARGS --submit"; fi
           python -m tennispred predict $ARGS
 
       - uses: actions/upload-artifact@v4

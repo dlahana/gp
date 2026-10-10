@@ -58,7 +58,79 @@ picks to X/Twitter.
 
 4. **Daily pipeline (`pipeline.py`, `cli.py`, `.github/workflows/tennis-daily.yml`).**
    The pipeline downloads the latest data, retrains, fetches today's fixtures,
-   predicts, picks the most prominent matches, formats a thread, and posts it.
+   predicts, and submits the most prominent matches to the bot server. The
+   server adds dumb nicknames and a corny AI write-up, then **texts you a
+   link. Nothing is posted until you approve it.**
+
+## Nicknames: dumb portmanteaus that learn from your friends
+
+```
+ surnames ─► enumerate every head+tail splice ─► reward model r(c) ─► sample 2–10 per match
+                (al|ca|raz × fe|de|rer:                ▲                 pi(c) ~ exp(r/tau)
+                 alcarer, naderer, fedal, ...)         │
+                                      friends pick the funniest on /rate/<code>
+```
+
+* **Generator (`portmanteau.py`).** Splits surnames into rough syllables
+  (handling `ch`, `cz`, `ts`, ... as one sound). It then lists every
+  "start of one name + end of the other" in both orders, cutting at
+  syllables, inside syllables, or at a shared letter. That gives about
+  50–70 candidates per pair, from canonical (sincaraz) to stupid
+  (alcaraderer).
+* **Reward model (`reward.py`).** Each rating screen shows 4 candidates plus
+  "none of these are funny". A pick is a multinomial-logit choice, so the
+  model learns `r(c) = w · features(c)`. The features include length, how
+  much of each name survives, the kind of cut, silly letters, endings, and
+  hashed letter trigrams (so it can learn which *sounds* are funny). It is
+  refit automatically after every 20 new votes.
+* **Policy.** Every candidate can be listed and scored, so the RLHF objective
+  (maximise reward with a KL penalty to uniform) has a closed-form answer,
+  `pi(c) ∝ exp(r(c)/tau)`. Posts sample 2–10 nicknames per match from it;
+  rating screens mix in uniformly random candidates so the model keeps
+  exploring.
+* **Name pool.** Rating screens pair real tennis surnames, weighted towards
+  big tennis countries (ESP, CZE, ITA, ...). A built-in list of about 110
+  players works out of the box; `python -m tennispred name-pool` builds a
+  bigger pool from the Sackmann players files (set `BOT_NAME_POOL`).
+* **Corny post (`corny.py`).** Claude writes the thread from the
+  predictions and nickname options, as structured JSON with a length check.
+  If the API key is missing or the call fails, a plain template is used, so
+  you still get a draft to approve.
+
+## Bot server (`tennispred/server`)
+
+One small FastAPI app with SQLite:
+
+| URL | who | what |
+|---|---|---|
+| `/rate/<code>` | friends | tap the funniest nickname, repeat forever |
+| `/drafts/<id>?t=<token>` | you (link arrives by SMS) | edit the tweets, "Rewrite" with a direction, Reject, or **Approve & post** |
+| `POST /api/drafts` | daily job | submit predictions (admin bearer token) |
+| `POST /api/invites`, `GET /api/admin/stats` | you | make friend links; see what the model has learned |
+
+Run it anywhere that keeps a disk around (Fly.io with a volume, Railway,
+Render with a disk, any small VPS):
+
+```bash
+docker build -t tennisbot tennis/
+docker run -p 8000:8000 -v tennisbot-data:/data \
+  -e BOT_ADMIN_TOKEN=... -e BOT_PUBLIC_URL=https://your-host \
+  -e ANTHROPIC_API_KEY=... \
+  -e TWILIO_ACCOUNT_SID=... -e TWILIO_AUTH_TOKEN=... -e TWILIO_FROM=+1... -e NOTIFY_PHONE=+1... \
+  -e X_API_KEY=... -e X_API_SECRET=... -e X_ACCESS_TOKEN=... -e X_ACCESS_TOKEN_SECRET=... \
+  tennisbot
+```
+
+Invite friends (each gets their own link, which you email them):
+
+```bash
+BOT_SERVER_URL=https://your-host BOT_ADMIN_TOKEN=... python -m tennispred invite sam alex jordan
+```
+
+**SMS note:** US carriers require Twilio numbers to be registered before
+they deliver texts (A2P 10DLC for local numbers, or toll-free verification).
+For texting only yourself this is a short form, but it can take a few days.
+Until it's done, the server logs the approval link instead of failing.
 
 ## Quick start
 
@@ -74,8 +146,8 @@ python -m tennispred train --model models/atp.json   # prints learned effects
 # Predict a day from a CSV (dry run: prints the thread, posts nothing)
 python -m tennispred predict --fixtures fixtures.example.csv --date 2026-10-10
 
-# Predict from the live fixture API and post
-TENNIS_API_KEY=... X_API_KEY=... python -m tennispred predict --fixtures api --post
+# Predict from the live fixture API and send to the bot server for approval
+TENNIS_API_KEY=... BOT_SERVER_URL=... BOT_ADMIN_TOKEN=... python -m tennispred predict --fixtures api --submit
 
 # Offline demo with synthetic data (known ground truth)
 python -m tennispred synth --data-dir /tmp/syn
@@ -97,13 +169,15 @@ pytest
    been tested against a live response. Run `predict --fixtures api` once by
    hand and check the output. To use a different provider, write a class with
    a `fixtures(day) -> list[Fixture]` method.
-3. **GitHub secrets** (Settings → Secrets and variables → Actions):
-   `TENNIS_API_KEY`, `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`,
-   `X_ACCESS_TOKEN_SECRET`.
-4. **Turn on posting.** Add the repository *variable* `POST_TO_X = true`.
-   Until then, scheduled runs are dry runs that upload the predictions as a
-   build artifact. Manual runs ("Run workflow") have a "Post to X" checkbox.
-5. Scheduled workflows only run from the default branch, so merge this branch
+3. **Deploy the bot server** (above) with the X, Twilio and Anthropic keys.
+4. **GitHub secrets** (Settings → Secrets and variables → Actions):
+   `TENNIS_API_KEY`, `BOT_SERVER_URL`, `BOT_ADMIN_TOKEN`. The X keys live only
+   on the server; GitHub never posts.
+5. **Turn on daily drafts.** Add the repository *variable*
+   `SUBMIT_DRAFTS = true`. Until then, scheduled runs are dry runs that
+   upload the predictions as a build artifact. Manual runs ("Run workflow")
+   have a "Send the draft for approval" checkbox.
+6. Scheduled workflows only run from the default branch, so merge this branch
    first.
 
 ## Caveats
@@ -132,6 +206,11 @@ tennispred/
   fixtures.py   CSV and api-tennis.com fixture sources
   names.py      fixture name → player id matching
   twitter.py    thread formatting + posting (tweepy, X API v2)
+  portmanteau.py  surname splicing: every head+tail candidate
+  reward.py     choice-model reward + exp(r/tau) sampling policy
+  name_pool.py  surnames for rating screens (country-weighted)
+  corny.py      Claude writes the corny thread (template fallback)
+  server/       FastAPI app: rating page, approval page, SMS, posting
   pipeline.py   build / train / backtest / predict
   synthetic.py  synthetic Sackmann-format data with planted effects
   cli.py        python -m tennispred ...
