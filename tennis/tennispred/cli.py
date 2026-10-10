@@ -10,8 +10,8 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from . import data, name_pool, pipeline, synthetic, twitter
-from .fixtures import ApiTennisSource, CsvFixtureSource
+from . import data, insights, name_pool, pipeline, synthetic, twitter
+from .fixtures import ApiTennisSource, CsvFixtureSource, Fixture
 from .model import ServeModel
 
 log = logging.getLogger("tennispred")
@@ -55,15 +55,19 @@ def cmd_backtest(args) -> None:
     print(res.round(4).to_string())
 
 
+def _load_or_train(args, built: pipeline.Built) -> ServeModel:
+    if args.model and Path(args.model).exists() and not args.retrain:
+        return ServeModel.load(Path(args.model))
+    model = pipeline.train(built, args.train_from, args.l2)
+    if args.model:
+        model.save(Path(args.model))
+    return model
+
+
 def cmd_predict(args) -> None:
     day = pd.Timestamp(args.date) if args.date else pd.Timestamp.today().normalize()
     built = pipeline.build_history(args.data_dir, args.tour, args.start_year)
-    if args.model and Path(args.model).exists() and not args.retrain:
-        model = ServeModel.load(Path(args.model))
-    else:
-        model = pipeline.train(built, args.train_from, args.l2)
-        if args.model:
-            model.save(Path(args.model))
+    model = _load_or_train(args, built)
 
     stale = pipeline.data_staleness_days(built.history, day)
     if stale is not None and stale > pipeline.STALE_DAYS:
@@ -88,7 +92,7 @@ def cmd_predict(args) -> None:
         print(f"[{i}/{len(thread)}] ({len(t)} chars)\n{t}\n")
 
     if args.submit:
-        submit_draft(preds, day, args.tour, args.max_matches)
+        submit_draft(built, model, preds, day, args.tour, args.max_matches)
         return
     if not args.post:
         print("dry run: pass --submit to send for approval (or --post to publish directly)")
@@ -114,25 +118,59 @@ def _server() -> tuple[str, dict]:
     return url.rstrip("/"), {"Authorization": f"Bearer {token}"}
 
 
-def submit_draft(preds: list[dict], day: pd.Timestamp, tour: str, max_matches: int) -> None:
-    """Send the most prominent matches to the bot server, which texts the owner for approval."""
+MATCH_KEYS = ("player1", "player2", "p1", "tournament", "surface", "best_of", "round", "fav_likely_score")
+
+
+def _post_draft(payload: dict) -> None:
     url, headers = _server()
-    chosen = sorted(preds, key=lambda d: -d["prominence"])[:max_matches]
-    keep = ("player1", "player2", "p1", "tournament", "surface", "best_of", "round", "fav_likely_score")
-    payload = {"day": f"{day.strftime('%a %b')} {day.day}", "tour": tour,
-               "matches": [{k: p[k] for k in keep} for p in chosen]}
-    resp = requests.post(f"{url}/api/drafts", json=payload, headers=headers, timeout=180)
+    resp = requests.post(f"{url}/api/drafts", json=payload, headers=headers, timeout=300)
     resp.raise_for_status()
     out = resp.json()
-    print(f"draft {out['id']} submitted; texted owner: {out['texted']}")
+    print(f"draft {out['id']} submitted; owner notified via: {', '.join(out['notified']) or 'nothing (see server log)'}")
 
 
-def cmd_invite(args) -> None:
+def submit_draft(built, model, preds: list[dict], day: pd.Timestamp, tour: str, max_matches: int) -> None:
+    """Send the most prominent matches to the bot server, which emails the owner for approval.
+
+    Each match is also simulated, and anything odd is included in the email (not the post).
+    """
+    chosen = sorted(preds, key=lambda d: -d["prominence"])[:max_matches]
+    odd = []
+    for p in chosen:
+        fx = Fixture(day, p["player1"], p["player2"], p["tournament"], p["surface"], p["best_of"])
+        try:
+            f = insights.matchup_facts(built, model, fx, tour, n_sims=500, n_marathon_games=200_000)
+            odd += [f"{p['player1']} vs {p['player2']}: {o}" for o in f["oddities"]]
+        except ValueError as exc:
+            log.warning("no oddity check for %s vs %s: %s", p["player1"], p["player2"], exc)
+    _post_draft({"day": f"{day.strftime('%a %b')} {day.day}", "tour": tour, "kind": "daily",
+                 "matches": [{k: p[k] for k in MATCH_KEYS} for p in chosen], "oddities": odd})
+
+
+def cmd_insights(args) -> None:
+    day = pd.Timestamp(args.date) if args.date else pd.Timestamp.today().normalize()
+    built = pipeline.build_history(args.data_dir, args.tour, args.start_year)
+    model = _load_or_train(args, built)
+    fx = Fixture(day, args.player1, args.player2, args.tournament or "", args.surface, args.best_of)
+    try:
+        facts = insights.matchup_facts(built, model, fx, args.tour, n_sims=args.sims)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    print(insights.render_text(facts))
+    if not args.submit:
+        print("\ndry run: pass --submit to have the bot write it up and email you for approval")
+        return
+    match = {"player1": facts["player1"], "player2": facts["player2"], "p1": facts["p1_win_final"],
+             "tournament": facts["tournament"], "surface": facts["surface"], "best_of": facts["best_of"]}
+    _post_draft({"day": f"{day.strftime('%a %b')} {day.day}", "tour": args.tour, "kind": "insights",
+                 "matches": [match], "facts": facts, "oddities": facts["oddities"]})
+
+
+def cmd_share_link(args) -> None:
     url, headers = _server()
-    for name in args.names:
-        resp = requests.post(f"{url}/api/invites", json={"name": name}, headers=headers, timeout=30)
-        resp.raise_for_status()
-        print(f"{name}: {resp.json()['url']}")
+    resp = requests.get(f"{url}/api/share-link", headers=headers, timeout=30)
+    resp.raise_for_status()
+    print(resp.json()["url"])
 
 
 def cmd_name_pool(args) -> None:
@@ -190,9 +228,23 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--force", action="store_true", help="post even if today's thread already went out")
     p.set_defaults(func=cmd_predict)
 
-    p = sub.add_parser("invite", help="make rating links for friends (needs BOT_SERVER_URL, BOT_ADMIN_TOKEN)")
-    p.add_argument("names", nargs="+")
-    p.set_defaults(func=cmd_invite)
+    p = sub.add_parser("insights", help="full breakdown + simulations for one match (optionally submit as a post)")
+    _common(p)
+    p.add_argument("player1")
+    p.add_argument("player2")
+    p.add_argument("--tournament", help="tournament name (used to infer surface / best-of)")
+    p.add_argument("--surface", choices=["Hard", "Clay", "Grass", "Carpet"])
+    p.add_argument("--best-of", type=int, choices=[3, 5])
+    p.add_argument("--date", help="YYYY-MM-DD, default today")
+    p.add_argument("--sims", type=int, default=500, help="simulated matches")
+    p.add_argument("--model", type=Path)
+    p.add_argument("--retrain", action="store_true")
+    p.add_argument("--l2", type=float, default=1.0)
+    p.add_argument("--submit", action="store_true", help="send to the bot server for write-up and approval")
+    p.set_defaults(func=cmd_insights)
+
+    p = sub.add_parser("share-link", help="print the one rating link to send friends")
+    p.set_defaults(func=cmd_share_link)
 
     p = sub.add_parser("name-pool", help="build the rating page's surname pool from players files")
     p.add_argument("--data-dir", type=Path, default=Path("data"))

@@ -56,10 +56,10 @@ picks to X/Twitter.
    independent-points chain tends to be over-confident. A single temperature on
    the match log-odds is fit on the most recent 15% of the training window.
 
-4. **Daily pipeline (`pipeline.py`, `cli.py`, `.github/workflows/tennis-daily.yml`).**
+4. **Daily pipeline (`pipeline.py`, `cli.py`, `.github/workflows/daily.yml`).**
    The pipeline downloads the latest data, retrains, fetches today's fixtures,
    predicts, and submits the most prominent matches to the bot server. The
-   server adds dumb nicknames and a corny AI write-up, then **texts you a
+   server adds dumb nicknames and a corny AI write-up, then **emails you a
    link. Nothing is posted until you approve it.**
 
 ## Nicknames: dumb portmanteaus that learn from your friends
@@ -103,39 +103,71 @@ One small FastAPI app with SQLite:
 
 | URL | who | what |
 |---|---|---|
-| `/rate/<code>` | friends | tap the funniest nickname, repeat forever |
-| `/drafts/<id>?t=<token>` | you (link arrives by SMS) | edit the tweets, "Rewrite" with a direction, Reject, or **Approve & post** |
-| `POST /api/drafts` | daily job | submit predictions (admin bearer token) |
-| `POST /api/invites`, `GET /api/admin/stats` | you | make friend links; see what the model has learned |
+| `/rate/<code>` | friends (one shared link) | tap the funniest nickname, repeat forever |
+| `/drafts/<id>?t=<token>` | you (link arrives by email) | edit the tweets, "Rewrite" with a direction, Reject, or **Approve & post** |
+| `POST /api/drafts` | daily / insights jobs | submit picks or a match breakdown (admin bearer token) |
+| `GET /api/share-link`, `GET /api/admin/stats` | you | the friends' link; votes, raters, what the model has learned |
 
 Run it anywhere that keeps a disk around (Fly.io with a volume, Railway,
 Render with a disk, any small VPS):
 
 ```bash
-docker build -t tennisbot tennis/
+docker build -t tennisbot .
 docker run -p 8000:8000 -v tennisbot-data:/data \
   -e BOT_ADMIN_TOKEN=... -e BOT_PUBLIC_URL=https://your-host \
   -e ANTHROPIC_API_KEY=... \
-  -e TWILIO_ACCOUNT_SID=... -e TWILIO_AUTH_TOKEN=... -e TWILIO_FROM=+1... -e NOTIFY_PHONE=+1... \
+  -e SMTP_HOST=smtp.gmail.com -e SMTP_USER=you@gmail.com -e SMTP_PASSWORD=<app password> -e NOTIFY_EMAIL=you@gmail.com \
   -e X_API_KEY=... -e X_API_SECRET=... -e X_ACCESS_TOKEN=... -e X_ACCESS_TOKEN_SECRET=... \
   tennisbot
 ```
 
-Invite friends (each gets their own link, which you email them):
+The friends' link (one link for everyone; each browser gets an anonymous id so
+votes can be counted per person):
 
 ```bash
-BOT_SERVER_URL=https://your-host BOT_ADMIN_TOKEN=... python -m tennispred invite sam alex jordan
+BOT_SERVER_URL=https://your-host BOT_ADMIN_TOKEN=... python -m tennispred share-link
 ```
 
-**SMS note:** US carriers require Twilio numbers to be registered before
-they deliver texts (A2P 10DLC for local numbers, or toll-free verification).
-For texting only yourself this is a short form, but it can take a few days.
-Until it's done, the server logs the approval link instead of failing.
+**Notifications.** Email works with any SMTP account. For Gmail, turn on
+2-step verification and create an "app password" to use as `SMTP_PASSWORD`.
+To add texts later, set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
+`TWILIO_FROM`, `NOTIFY_PHONE`; both channels then fire. US carriers require
+Twilio numbers to be registered (A2P 10DLC or toll-free verification), which
+can take a few days. With no channel configured, the approval link is written
+to the server log.
+
+## Match insights posts (on demand)
+
+For a deep dive on one match: GitHub → Actions → **Match insights post** →
+Run workflow, then type two players (this also works from the GitHub mobile
+app). Or from a terminal:
+
+```bash
+python -m tennispred insights "Jannik Sinner" "Carlos Alcaraz" --tournament "Shanghai Masters"           # print it
+python -m tennispred insights "Jannik Sinner" "Carlos Alcaraz" --tournament "Shanghai Masters" --submit  # draft + email
+```
+
+The breakdown includes:
+
+* the win probability, each player's serve-point and hold rates;
+* the factors that moved it (grouped as Elo, serve, return, lefty/righty,
+  height, age, workload, ...);
+* 500 simulated matches: set scores, deciding sets, tiebreaks, the longest
+  match and the longest game;
+* a "marathon": the longest of a million simulated service games, point by
+  point.
+
+Claude writes it up as a thread from those facts only; you approve it as usual.
+
+**Oddities.** Every daily submission also simulates each match. Anything
+strange goes in the approval email for you, never in the post. Examples:
+the model disagreeing with Elo, a break-fest, a 30-point game, or a
+surprising driver like height or handedness. Any of these can become an
+insights post.
 
 ## Quick start
 
 ```bash
-cd tennis
 pip install -r requirements.txt
 
 # Real data (Jeff Sackmann's ATP/WTA files)
@@ -169,7 +201,7 @@ pytest
    been tested against a live response. Run `predict --fixtures api` once by
    hand and check the output. To use a different provider, write a class with
    a `fixtures(day) -> list[Fixture]` method.
-3. **Deploy the bot server** (above) with the X, Twilio and Anthropic keys.
+3. **Deploy the bot server** (above) with the X, email and Anthropic keys.
 4. **GitHub secrets** (Settings → Secrets and variables → Actions):
    `TENNIS_API_KEY`, `BOT_SERVER_URL`, `BOT_ADMIN_TOKEN`. The X keys live only
    on the server; GitHub never posts.
@@ -210,7 +242,8 @@ tennispred/
   reward.py     choice-model reward + exp(r/tau) sampling policy
   name_pool.py  surnames for rating screens (country-weighted)
   corny.py      Claude writes the corny thread (template fallback)
-  server/       FastAPI app: rating page, approval page, SMS, posting
+  insights.py   one-match breakdown: drivers, 500 simulations, marathon game, oddities
+  server/       FastAPI app: rating page, approval page, email/SMS, posting
   pipeline.py   build / train / backtest / predict
   synthetic.py  synthetic Sackmann-format data with planted effects
   cli.py        python -m tennispred ...

@@ -69,14 +69,33 @@ def fallback_thread(matches: list[dict], header: str) -> tuple[list[str], list[s
     return tweets, used
 
 
-def write_thread(matches: list[dict], day_label: str, extra_instructions: str = "") -> tuple[list[str], list[str], str]:
-    """Returns (tweets, nickname used per match, source) where source is 'claude' or 'template'."""
+INSIGHTS_TASK = (
+    "Write a 3-6 tweet thread explaining how the model reached this prediction, for curious fans. "
+    "Cover: the final win probability, each player's chance of winning a point on serve and holding serve, "
+    "the biggest factors and who they favour, and the most entertaining simulation results (set scores, "
+    "longest game, the marathon game, anything in 'oddities'). Explain the random walk in one plain "
+    "sentence: every point is a weighted coin flip, games, sets and matches are just where the coin flips lead. "
+    "Use every number exactly as given (round to whole percentages). Do not invent statistics."
+)
+
+
+def write_thread(matches: list[dict], day_label: str, extra_instructions: str = "",
+                 facts: dict | None = None) -> tuple[list[str], list[str], str]:
+    """Returns (tweets, nickname used per match, source) where source is 'claude' or 'template'.
+
+    With `facts` (from insights.matchup_facts) it writes a match-insights thread instead of the daily picks.
+    """
     header = f"🎾 Picks for {day_label}"
     try:
         import anthropic
         client = anthropic.Anthropic()
-        prompt = (f"Write today's thread ({day_label}). Keep it to {max(1, len(matches) // 3 + 1)} tweet(s) "
-                  "if you can.\n\n" + "\n".join(_match_brief(i, m) for i, m in enumerate(matches)))
+        if facts:
+            brief = dict(facts)
+            brief["marathon"] = {k: v for k, v in facts["marathon"].items() if k != "sequence"}
+            prompt = f"{INSIGHTS_TASK}\n\n{_match_brief(0, matches[0])}\n\nFacts (JSON):\n{json.dumps(brief)}"
+        else:
+            prompt = (f"Write today's thread ({day_label}). Keep it to {max(1, len(matches) // 3 + 1)} tweet(s) "
+                      "if you can.\n\n" + "\n".join(_match_brief(i, m) for i, m in enumerate(matches)))
         if extra_instructions:
             prompt += f"\n\nExtra direction from the account owner: {extra_instructions}"
         response = client.beta.messages.create(
@@ -101,5 +120,23 @@ def write_thread(matches: list[dict], day_label: str, extra_instructions: str = 
         return tweets, used, "claude"
     except Exception as exc:  # any failure falls back to the template; the human still reviews it
         log.warning("corny writer fell back to template: %s", exc)
+        if facts:
+            return insights_fallback(facts, matches), [m["nicknames"][0] if m["nicknames"] else "" for m in matches], "template"
         tweets, used = fallback_thread(matches, header)
         return tweets, used, "template"
+
+
+def insights_fallback(f: dict, matches: list[dict]) -> list[str]:
+    """Plain thread from the facts, used when Claude is unavailable."""
+    p1, p2, sim = f["player1"], f["player2"], f["simulations"]
+    nick = matches[0]["nicknames"][0].capitalize() if matches and matches[0]["nicknames"] else f"{p1} vs {p2}"
+    sp, hold = f["serve_point_win"], f["hold_rate"]
+    t1 = (f"🎾 {nick}: how the model sees {p1} vs {p2}. {p1} wins {f['p1_win_final']:.0%}. "
+          f"Serve points won: {p1} {sp[p1]:.0%}, {p2} {sp[p2]:.0%}. Holds: {hold[p1]:.0%} vs {hold[p2]:.0%}.")
+    drivers = "; ".join(f"{d['factor']} ({d['favours'].split()[-1]})" for d in f["drivers"][:4])
+    t2 = f"Biggest factors: {drivers}."
+    t3 = (f"In {sim['n']} simulated matches {p1} won {sim['p1_wins']}. {sim['tiebreaks_played']} tiebreaks, "
+          f"longest game {sim['longest_game_points']} points.")
+    m = f["marathon"]
+    t4 = f"Longest of {m['games_simulated']:,} simulated {m['server']} service games: {m['points']} points, {m['deuces']} deuces."
+    return [t[:280] for t in (t1, t2, t3, t4)]

@@ -71,10 +71,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("BOT_PUBLIC_URL", "https://bot.test")
     monkeypatch.setenv("BOT_REWARD_PATH", str(tmp_path / "reward.json"))
     texts_sent, posted = [], []
-    monkeypatch.setattr(app_mod.notify, "send_sms", lambda body: texts_sent.append(body) or True)
+    monkeypatch.setattr(app_mod.notify, "notify",
+                        lambda subject, link, details="": texts_sent.append((subject, link, details)) or ["email"])
     monkeypatch.setattr(app_mod.corny, "write_thread",
-                        lambda matches, day, extra="": (["corny " + day + (" " + extra if extra else "")],
-                                                        [m["nicknames"][0] for m in matches], "claude"))
+                        lambda matches, day, extra="", facts=None: (
+                            [("insights " if facts else "corny ") + day + (" " + extra if extra else "")],
+                            [m["nicknames"][0] for m in matches], "claude"))
     monkeypatch.setattr(app_mod.twitter, "credentials_from_env", lambda: {"k": "v"})
     monkeypatch.setattr(app_mod.twitter, "post_thread", lambda tweets, creds: posted.append(tweets) or ["111"])
     c = TestClient(app_mod.create_app(str(tmp_path / "bot.db")))
@@ -86,18 +88,20 @@ AUTH = {"Authorization": "Bearer secret"}
 
 
 def test_rating_flow(client):
-    assert client.post("/api/invites", json={"name": "sam"}).status_code == 401
-    url = client.post("/api/invites", json={"name": "sam"}, headers=AUTH).json()["url"]
+    assert client.get("/api/share-link").status_code == 401
+    url = client.get("/api/share-link", headers=AUTH).json()["url"]
+    assert url.startswith("https://bot.test/rate/")
     code = url.rsplit("/", 1)[1]
     assert client.get(f"/rate/{code}").status_code == 200
     assert client.get("/rate/nope").status_code == 404
-    r = client.get(f"/api/round/{code}").json()
+    r = client.get(f"/api/round/{code}?rater=amy").json()
     assert len(r["shown"]) == 4
-    nxt = client.post(f"/api/vote/{code}", json={"round_id": r["round_id"], "chosen": 2}).json()
+    nxt = client.post(f"/api/vote/{code}", json={"round_id": r["round_id"], "chosen": 2, "rater": "amy"}).json()
     assert nxt["my_votes"] == 1 and nxt["round_id"] != r["round_id"]
-    client.post(f"/api/vote/{code}", json={"round_id": nxt["round_id"], "chosen": None})
+    client.post(f"/api/vote/{code}", json={"round_id": nxt["round_id"], "chosen": None, "rater": "bo"})
     assert client.post(f"/api/vote/{code}", json={"round_id": nxt["round_id"], "chosen": 9}).status_code == 400
-    assert client.get("/api/admin/stats", headers=AUTH).json()["votes"] == 2
+    stats = client.get("/api/admin/stats", headers=AUTH).json()
+    assert stats["votes"] == 2 and stats["raters"] == 2
 
 
 def test_draft_approval_flow(client):
@@ -105,7 +109,7 @@ def test_draft_approval_flow(client):
              "surface": "Hard"}
     assert client.post("/api/drafts", json={"day": "Sat Oct 10", "matches": [match]}).status_code == 401
     out = client.post("/api/drafts", json={"day": "Sat Oct 10", "matches": [match]}, headers=AUTH).json()
-    assert out["texted"] and out["url"] in client.texts[0]
+    assert out["notified"] == ["email"] and client.texts[0][1] == out["url"]
     did, tok = out["id"], out["url"].split("t=")[1]
     page = client.get(f"/drafts/{did}?t={tok}")
     assert page.status_code == 200 and "corny Sat Oct 10" in page.text
@@ -127,3 +131,56 @@ def test_draft_has_2_to_10_nicknames(client, tmp_path):
         did = client.post("/api/drafts", json={"day": "d", "matches": [match]}, headers=AUTH).json()["id"]
         nicks = Store(tmp_path / "bot.db").draft(did)["matches"][0]["nicknames"]
         assert 2 <= len(nicks) <= 10
+
+
+def test_insights_draft_and_oddities_email(client):
+    match = {"player1": "Jannik Sinner", "player2": "Carlos Alcaraz", "p1": 0.58}
+    facts = {"player1": "Jannik Sinner", "player2": "Carlos Alcaraz"}
+    assert client.post("/api/drafts", json={"day": "d", "kind": "insights", "matches": [match]},
+                       headers=AUTH).status_code == 400
+    out = client.post("/api/drafts", json={"day": "d", "kind": "insights", "matches": [match], "facts": facts,
+                                           "oddities": ["a 40-point game"]}, headers=AUTH).json()
+    assert out["tweets"] == ["insights d"]
+    subject, link, details = client.texts[-1]
+    assert "insights" in subject and "a 40-point game" in details and "insights d" in details
+
+
+def test_share_link_is_stable(tmp_path, monkeypatch):
+    from tennispred.server import app as app_mod
+
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "secret")
+    db = str(tmp_path / "bot.db")
+    first = TestClient(app_mod.create_app(db)).get("/api/share-link", headers=AUTH).json()["url"]
+    again = TestClient(app_mod.create_app(db)).get("/api/share-link", headers=AUTH).json()["url"]
+    assert first == again
+
+
+def test_email_notification(monkeypatch):
+    from tennispred.server import notify
+
+    for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "NOTIFY_EMAIL", "TWILIO_ACCOUNT_SID"):
+        monkeypatch.delenv(k, raising=False)
+    assert notify.notify("subj", "https://x") == []
+    sent = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            sent.append((host, port))
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def starttls(self):
+            pass
+        def login(self, user, password):
+            sent.append(user)
+        def send_message(self, msg):
+            sent.append(msg["To"])
+            sent.append(msg.get_content())
+
+    monkeypatch.setattr(notify.smtplib, "SMTP", FakeSMTP)
+    for k, v in {"SMTP_HOST": "smtp.gmail.com", "SMTP_USER": "me@x.com", "SMTP_PASSWORD": "pw",
+                 "NOTIFY_EMAIL": "me@x.com"}.items():
+        monkeypatch.setenv(k, v)
+    assert notify.notify("Draft ready", "https://bot/drafts/1", "details") == ["email"]
+    assert sent[0] == ("smtp.gmail.com", 587) and "https://bot/drafts/1" in sent[-1]

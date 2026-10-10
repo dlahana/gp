@@ -126,3 +126,20 @@ def test_post_thread_chains_replies(monkeypatch):
     ids = twitter.post_thread(["one", "two", "three"], twitter.credentials_from_env())
     assert ids == ["1", "2", "3"]
     assert calls == [("one", None), ("two", "1"), ("three", "2")]
+
+
+def test_insights_report(built):
+    from tennispred import insights
+
+    model = pipeline.train(built, "2016-01-01")
+    day = built.history.last_date + pd.Timedelta(days=2)
+    f = insights.matchup_facts(built, model, Fixture(day, "Holger Synthh", "Carlos Synthc", "Synth Open 26"),
+                               n_sims=200, n_marathon_games=20_000, seed=0)
+    sim = f["simulations"]
+    assert sim["n"] == 200 and sum(sim["set_scores"].values()) == 200
+    assert 0 < f["p1_win_final"] < 1 and f["drivers"]
+    assert len(f["marathon"]["sequence"]) == f["marathon"]["points"] >= 4
+    assert "simulated matches" in insights.render_text(f)
+    json.dumps(f)  # must be serialisable for the server
+    with pytest.raises(ValueError):
+        insights.matchup_facts(built, model, Fixture(day, "Nobody Atall", "Carlos Synthc"))

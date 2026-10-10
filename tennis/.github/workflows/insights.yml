@@ -1,0 +1,66 @@
+name: Match insights post
+
+# Run from the Actions tab (or the GitHub mobile app): type two players, get an
+# email with the full breakdown and a drafted thread to approve.
+on:
+  workflow_dispatch:
+    inputs:
+      player1:
+        description: "Player 1 (e.g. Jannik Sinner)"
+        required: true
+      player2:
+        description: "Player 2 (e.g. Carlos Alcaraz)"
+        required: true
+      tournament:
+        description: "Tournament (optional; sets surface and best-of)"
+        required: false
+      surface:
+        description: "Surface (optional)"
+        type: choice
+        options: ["", Hard, Clay, Grass]
+        default: ""
+      tour:
+        type: choice
+        options: [atp, wta]
+        default: atp
+      sims:
+        description: "Simulated matches"
+        default: "500"
+
+jobs:
+  insights:
+    runs-on: ubuntu-latest
+    env:
+      BOT_SERVER_URL: ${{ secrets.BOT_SERVER_URL }}
+      BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Restore match data
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: tennis-data-${{ inputs.tour }}-${{ github.run_id }}
+          restore-keys: tennis-data-${{ inputs.tour }}-
+      - name: Refresh match data
+        run: python -m tennispred download --tour "$TOUR" --start-year 1985
+        env:
+          TOUR: ${{ inputs.tour }}
+      - name: Build breakdown and submit for approval
+        env:
+          P1: ${{ inputs.player1 }}
+          P2: ${{ inputs.player2 }}
+          TOURNAMENT: ${{ inputs.tournament }}
+          SURFACE: ${{ inputs.surface }}
+          TOUR: ${{ inputs.tour }}
+          SIMS: ${{ inputs.sims }}
+        run: |
+          ARGS=(--tour "$TOUR" --sims "$SIMS" --submit)
+          if [ -n "$TOURNAMENT" ]; then ARGS+=(--tournament "$TOURNAMENT"); fi
+          if [ -n "$SURFACE" ]; then ARGS+=(--surface "$SURFACE"); fi
+          python -m tennispred insights "$P1" "$P2" "${ARGS[@]}"
