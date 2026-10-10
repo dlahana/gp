@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import requests
 
-from . import data, pipeline, synthetic, twitter
+from . import data, name_pool, pipeline, synthetic, twitter
 from .fixtures import ApiTennisSource, CsvFixtureSource
 from .model import ServeModel
 
@@ -86,8 +87,11 @@ def cmd_predict(args) -> None:
     for i, t in enumerate(thread, 1):
         print(f"[{i}/{len(thread)}] ({len(t)} chars)\n{t}\n")
 
+    if args.submit:
+        submit_draft(preds, day, args.tour, args.max_matches)
+        return
     if not args.post:
-        print("dry run: pass --post to publish")
+        print("dry run: pass --submit to send for approval (or --post to publish directly)")
         return
     marker = args.out_dir / f".posted_{args.tour}_{day.date()}"
     if marker.exists() and not args.force:
@@ -99,6 +103,48 @@ def cmd_predict(args) -> None:
     ids = twitter.post_thread(thread, creds)
     marker.write_text("\n".join(ids))
     print(f"posted {len(ids)} tweets: https://x.com/i/status/{ids[0]}")
+
+
+def _server() -> tuple[str, dict]:
+    import os
+
+    url, token = os.environ.get("BOT_SERVER_URL"), os.environ.get("BOT_ADMIN_TOKEN")
+    if not url or not token:
+        sys.exit("set BOT_SERVER_URL and BOT_ADMIN_TOKEN")
+    return url.rstrip("/"), {"Authorization": f"Bearer {token}"}
+
+
+def submit_draft(preds: list[dict], day: pd.Timestamp, tour: str, max_matches: int) -> None:
+    """Send the most prominent matches to the bot server, which texts the owner for approval."""
+    url, headers = _server()
+    chosen = sorted(preds, key=lambda d: -d["prominence"])[:max_matches]
+    keep = ("player1", "player2", "p1", "tournament", "surface", "best_of", "round", "fav_likely_score")
+    payload = {"day": f"{day.strftime('%a %b')} {day.day}", "tour": tour,
+               "matches": [{k: p[k] for k in keep} for p in chosen]}
+    resp = requests.post(f"{url}/api/drafts", json=payload, headers=headers, timeout=180)
+    resp.raise_for_status()
+    out = resp.json()
+    print(f"draft {out['id']} submitted; texted owner: {out['texted']}")
+
+
+def cmd_invite(args) -> None:
+    url, headers = _server()
+    for name in args.names:
+        resp = requests.post(f"{url}/api/invites", json={"name": name}, headers=headers, timeout=30)
+        resp.raise_for_status()
+        print(f"{name}: {resp.json()['url']}")
+
+
+def cmd_name_pool(args) -> None:
+    pool = []
+    for tour in ("atp", "wta"):
+        path = args.data_dir / f"{tour}_players.csv"
+        if path.exists():
+            pool += name_pool.from_players_file(path, tour, args.born_after)
+    if not pool:
+        sys.exit(f"no players files in {args.data_dir}; run download for atp and wta first")
+    name_pool.save(pool, args.out)
+    print(f"wrote {len(pool)} names to {args.out}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -138,9 +184,21 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--l2", type=float, default=1.0)
     p.add_argument("--out-dir", type=Path, default=Path("predictions"))
     p.add_argument("--max-matches", type=int, default=5, help="matches to include in the thread")
-    p.add_argument("--post", action="store_true", help="actually post to X")
+    p.add_argument("--submit", action="store_true",
+                   help="send to the bot server for nicknames, a corny rewrite and SMS approval")
+    p.add_argument("--post", action="store_true", help="post the plain thread to X directly (no approval)")
     p.add_argument("--force", action="store_true", help="post even if today's thread already went out")
     p.set_defaults(func=cmd_predict)
+
+    p = sub.add_parser("invite", help="make rating links for friends (needs BOT_SERVER_URL, BOT_ADMIN_TOKEN)")
+    p.add_argument("names", nargs="+")
+    p.set_defaults(func=cmd_invite)
+
+    p = sub.add_parser("name-pool", help="build the rating page's surname pool from players files")
+    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--born-after", type=int, default=1975)
+    p.add_argument("--out", type=Path, default=Path("name_pool.json"))
+    p.set_defaults(func=cmd_name_pool)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

@@ -3,3 +3,6 @@ models/
 predictions/
 __pycache__/
 .pytest_cache/
+bot.db
+reward.json
+name_pool.json
