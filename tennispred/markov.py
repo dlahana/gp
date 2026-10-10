@@ -215,6 +215,12 @@ class SimulatedMatch:
     sets: list[tuple[int, int]]           # games per set, (A, B)
     tiebreaks: list[tuple[int, int] | None]
     serve_points: dict[str, int]          # svpt / svpt_won for each player
+    longest_game: str = ""                # point sequence of the longest game, e.g. "SRSRSS..."
+    longest_game_server_is_a: bool = True  # (S = server won the point, R = returner won)
+
+    @property
+    def total_points(self) -> int:
+        return self.serve_points["a_svpt"] + self.serve_points["b_svpt"]
 
 
 def simulate_match(p_a: float, p_b: float, best_of: int = 3, rng: np.random.Generator | None = None,
@@ -235,17 +241,22 @@ def simulate_match(p_a: float, p_b: float, best_of: int = 3, rng: np.random.Gene
         stats["b_won"] += w
         return not w
 
+    longest = {"seq": "", "a_serving": True}
+
     def game(a_serving: bool) -> bool:
         a = b = 0
+        seq = []
         while True:
-            if point(a_serving):
+            won = point(a_serving)
+            seq.append("S" if won == a_serving else "R")
+            if won:
                 a += 1
             else:
                 b += 1
-            if a >= 4 and a - b >= 2:
-                return True
-            if b >= 4 and b - a >= 2:
-                return False
+            if (a >= 4 or b >= 4) and abs(a - b) >= 2:
+                if len(seq) > len(longest["seq"]):
+                    longest["seq"], longest["a_serving"] = "".join(seq), a_serving
+                return a > b
 
     def tiebreak(a_first: bool, target: int) -> tuple[bool, tuple[int, int]]:
         a = b = 0
@@ -298,4 +309,29 @@ def simulate_match(p_a: float, p_b: float, best_of: int = 3, rng: np.random.Gene
         tiebreaks=tbs,
         serve_points={"a_svpt": stats["a_svpt"], "a_svpt_won": stats["a_won"],
                       "b_svpt": stats["b_svpt"], "b_svpt_won": stats["b_won"]},
+        longest_game=longest["seq"],
+        longest_game_server_is_a=longest["a_serving"],
     )
+
+
+def longest_game_in(p_server: float, n_games: int, rng: np.random.Generator | None = None) -> str:
+    """Play n_games service games and return the longest one's point sequence (S/R).
+
+    Vectorised: one row per game, columns are points; a game lasting k points
+    has probability ~(2pq)^((k-6)/2), so 60 columns covers billions of games.
+    """
+    rng = rng or np.random.default_rng()
+    width = 60
+    best = ""
+    for start in range(0, n_games, 200_000):
+        n = min(200_000, n_games - start)
+        pts = rng.random((n, width)) < p_server            # True = server wins point
+        s = np.cumsum(pts, axis=1)
+        r = np.cumsum(~pts, axis=1)
+        done = ((s >= 4) | (r >= 4)) & (np.abs(s - r) >= 2)
+        has_end = done.any(axis=1)
+        length = np.where(has_end, done.argmax(axis=1) + 1, width + 1)
+        i = int(np.argmax(length))
+        if length[i] > len(best) and length[i] <= width:
+            best = "".join("S" if x else "R" for x in pts[i, : length[i]])
+    return best

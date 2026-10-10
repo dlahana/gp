@@ -35,6 +35,8 @@ Your picks teach the bot what's funny.</p>
 <p class="muted count" id="count"></p>
 </main><script>
 const code = __CODE__;
+let rater = '';
+try { rater = localStorage.getItem('rater') || ''; if (!rater) { rater = Math.random().toString(36).slice(2, 12); localStorage.setItem('rater', rater); } } catch (e) {}
 let round = null, busy = false;
 function render(r) {
   round = r;
@@ -44,10 +46,10 @@ function render(r) {
     b.textContent = nick.charAt(0).toUpperCase() + nick.slice(1); b.onclick = () => vote(i); box.appendChild(b); });
   document.getElementById('count').textContent = r.my_votes ? r.my_votes + ' picks so far, thank you' : '';
 }
-async function load() { const r = await fetch('/api/round/' + code); if (!r.ok) { document.getElementById('vs').textContent = 'This link is not valid.'; return; } render(await r.json()); }
+async function load() { const r = await fetch('/api/round/' + code + '?rater=' + encodeURIComponent(rater)); if (!r.ok) { document.getElementById('vs').textContent = 'This link is not valid.'; return; } render(await r.json()); }
 async function vote(i) { if (busy || !round) return; busy = true;
   try { const r = await fetch('/api/vote/' + code, {method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({round_id: round.round_id, chosen: i})}); render(await r.json()); } finally { busy = false; } }
+      body: JSON.stringify({round_id: round.round_id, chosen: i, rater})}); render(await r.json()); } finally { busy = false; } }
 document.getElementById('none').onclick = () => vote(null);
 load();
 </script></body></html>"""
@@ -59,10 +61,10 @@ APPROVE_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 border-radius:999px; padding:2px 10px; margin:3px 4px 0 0; font-size:14px; } .chips .used { background:var(--accent); color:#1d1d1b; border-color:transparent; }
 .len { font-size:13px; color:var(--muted); text-align:right; } .status { font-weight:600; margin-top:12px; } input { width:100%; font:inherit; padding:10px;
 border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--fg); } </style></head><body><main>
-<h1>Draft for __DAY__ (__TOUR__)</h1><p class="muted">Status: <b id="st">__STATUS__</b> · written by __SOURCE__.
+<h1>__KIND__ for __DAY__ (__TOUR__)</h1><p class="muted">Status: <b id="st">__STATUS__</b> · written by __SOURCE__.
 Edit freely; nothing is posted until you tap Approve.</p>
 <div id="tweets"></div>
-<div class="card"><b>Matches and nickname options</b>__MATCHES__</div>
+<div class="card"><b>Matches and nickname options</b>__MATCHES__</div>__FACTS__
 <div class="card"><input id="dir" placeholder="Direction for a rewrite (optional), e.g. more puns, use 'naderer'">
 <div class="row"><button id="regen">Rewrite</button><button id="reject">Reject</button>
 <button class="primary" id="approve">Approve &amp; post</button></div><div class="status" id="msg"></div></div>
@@ -107,9 +109,15 @@ def approve_page(draft: dict) -> str:
         rows.append(f'<div style="margin-top:12px"><div>{html.escape(m["player1"])} vs {html.escape(m["player2"])} · '
                     f'{html.escape(fav)} {p:.0%}</div><div class="chips">{chips}</div></div>')
     locked = draft["status"] != "pending"
+    facts = ""
+    if draft.get("facts"):
+        from ..insights import render_text
+        facts = (f'<div class="card"><b>The numbers behind it</b><pre style="white-space:pre-wrap;font-size:13px">'
+                 f'{html.escape(render_text(draft["facts"]))}</pre></div>')
     return (APPROVE_PAGE.replace("__CSS__", BASE_CSS)
+            .replace("__KIND__", "Match insights" if draft["kind"] == "insights" else "Picks")
             .replace("__DAY__", html.escape(draft["day"])).replace("__TOUR__", html.escape(draft["tour"].upper()))
             .replace("__STATUS__", html.escape(draft["status"])).replace("__SOURCE__", html.escape(draft["source"]))
-            .replace("__MATCHES__", "".join(rows)).replace("__ID__", _js(draft["id"]))
+            .replace("__MATCHES__", "".join(rows)).replace("__FACTS__", facts).replace("__ID__", _js(draft["id"]))
             .replace("__TOKEN__", _js(draft["token"])).replace("__TWEETS__", _js(draft["tweets"]))
             .replace("__LOCKED__", _js(locked)))

@@ -1,0 +1,71 @@
+name: Daily tennis predictions
+
+on:
+  schedule:
+    - cron: "17 10 * * *"   # 10:17 UTC every day
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Date to predict (YYYY-MM-DD, blank = today)"
+        required: false
+      submit:
+        description: "Send the draft for approval (you get a text)"
+        type: boolean
+        default: false
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tour: [atp]          # add wta to post a second daily thread
+    env:
+      TENNIS_API_KEY: ${{ secrets.TENNIS_API_KEY }}
+      BOT_SERVER_URL: ${{ secrets.BOT_SERVER_URL }}
+      BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore match data
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: tennis-data-${{ matrix.tour }}-${{ github.run_id }}
+          restore-keys: tennis-data-${{ matrix.tour }}-
+
+      - name: Refresh match data
+        run: python -m tennispred download --tour ${{ matrix.tour }} --start-year 1985
+
+      - name: Predict and submit for approval
+        env:
+          INPUT_DATE: ${{ inputs.date }}
+          INPUT_SUBMIT: ${{ inputs.submit }}
+          SUBMIT_DRAFTS: ${{ vars.SUBMIT_DRAFTS }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          ARGS="--tour ${{ matrix.tour }} --fixtures api --retrain --model models/${{ matrix.tour }}.json"
+          if [ -n "$INPUT_DATE" ]; then ARGS="$ARGS --date $INPUT_DATE"; fi
+          # Nothing is ever posted from here: drafts go to the bot server, which
+          # texts you and posts only after you approve. Scheduled runs submit
+          # when the repo variable SUBMIT_DRAFTS is "true"; manual runs when ticked.
+          if [ "$EVENT" = "schedule" ] && [ "$SUBMIT_DRAFTS" = "true" ]; then ARGS="$ARGS --submit"; fi
+          if [ "$INPUT_SUBMIT" = "true" ]; then ARGS="$ARGS --submit"; fi
+          python -m tennispred predict $ARGS
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: predictions-${{ matrix.tour }}-${{ github.run_id }}
+          path: |
+            predictions/
+            models/
+          if-no-files-found: ignore

@@ -2,17 +2,19 @@
 
 Run with:  uvicorn tennispred.server.app:create_app --factory --host 0.0.0.0 --port 8000
 
-Friends:  /rate/<invite code>              pick the funniest nickname, repeat
+Friends:  /rate/<shared code>              one link for everyone: pick the funniest nickname, repeat
 You:      /drafts/<id>?t=<token>           edit / rewrite / reject / approve the day's post
-Pipeline: POST /api/drafts  (Bearer admin)  submit the day's predictions
+Pipeline: POST /api/drafts  (Bearer admin)  submit the day's predictions or a match-insights report
 
 Configuration (environment):
     BOT_DB_PATH            SQLite file (default bot.db)
-    BOT_ADMIN_TOKEN        bearer token for /api/drafts, /api/invites, /api/admin/*
+    BOT_ADMIN_TOKEN        bearer token for /api/drafts, /api/share-link, /api/admin/*
     BOT_PUBLIC_URL         e.g. https://tennisbot.example.com (used in texts and invite links)
+    BOT_SHARE_CODE         optional fixed code for the shared rating link (else generated once)
     BOT_NAME_POOL          optional JSON from `tennispred name-pool`
     BOT_REWARD_PATH        where the fitted reward model is cached (default reward.json)
-    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, NOTIFY_PHONE
+    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, NOTIFY_EMAIL   (approval emails)
+    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, NOTIFY_PHONE  (optional SMS)
     X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
     ANTHROPIC_API_KEY
 """
@@ -46,12 +48,16 @@ POST_TAU = 1.0            # policy temperature for nicknames offered in posts
 class VoteIn(BaseModel):
     round_id: int
     chosen: int | None = None
+    rater: str = ""
 
 
 class DraftIn(BaseModel):
     day: str
     tour: str = "atp"
+    kind: str = "daily"                  # "daily" or "insights"
     matches: list[dict]
+    facts: dict | None = None            # insights: the computed breakdown
+    oddities: list[str] = []             # emailed to the owner, never posted
 
 
 class TweetsIn(BaseModel):
@@ -60,10 +66,6 @@ class TweetsIn(BaseModel):
 
 class RegenIn(BaseModel):
     direction: str = ""
-
-
-class InviteIn(BaseModel):
-    name: str
 
 
 def create_app(db_path: str | None = None) -> FastAPI:
@@ -75,6 +77,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
              "fit_at": None, "lock": threading.Lock()}
     rng = np.random.default_rng()
     public = os.environ.get("BOT_PUBLIC_URL", "").rstrip("/")
+    share_code = os.environ.get("BOT_SHARE_CODE") or store.shared_code()
+    if share_code is None:
+        share_code = secrets.token_urlsafe(6)
+    if store.invite(share_code) is None:
+        store.add_invite(share_code, "shared")
 
     def admin(authorization: str = Header(default="")) -> None:
         expected = os.environ.get("BOT_ADMIN_TOKEN")
@@ -102,12 +109,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     # ------------------------------------------------------------- rating
 
-    def new_round(code: str) -> dict:
+    def new_round(code: str, rater: str) -> dict:
         a, b = name_pool.sample_pair(pool, rng)
         shown = model().rating_round(a.name, b.name, k=4, rng=rng)
         rid = store.add_round(code, a.name, b.name, shown)
         return {"round_id": rid, "name_a": a.name, "name_b": b.name, "shown": shown,
-                "my_votes": store.vote_count(code)}
+                "my_votes": store.vote_count(rater) if rater else 0}
 
     @app.get("/", response_class=HTMLResponse)
     def home():
@@ -120,10 +127,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
         return pages.rate_page(code)
 
     @app.get("/api/round/{code}")
-    def get_round(code: str):
+    def get_round(code: str, rater: str = ""):
         if store.invite(code) is None:
             raise HTTPException(404, "invalid link")
-        return new_round(code)
+        return new_round(code, rater[:64])
 
     @app.post("/api/vote/{code}")
     def vote(code: str, body: VoteIn):
@@ -135,8 +142,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
         n_shown = len(json.loads(r["shown"]))
         if body.chosen is not None and not 0 <= body.chosen < n_shown:
             raise HTTPException(400, "bad choice")
-        store.add_vote(body.round_id, code, body.chosen)
-        return new_round(code)
+        rater = body.rater[:64]
+        store.add_vote(body.round_id, code, rater, body.chosen)
+        return new_round(code, rater)
 
     # ------------------------------------------------------------- drafts
 
@@ -153,13 +161,22 @@ def create_app(db_path: str | None = None) -> FastAPI:
             m = dict(m)
             m["nicknames"] = nicknames_for(m)
             matches.append(m)
-        tweets, used, source = corny.write_thread(matches, body.day)
-        d = {"id": secrets.token_hex(4), "token": secrets.token_urlsafe(16), "day": body.day, "tour": body.tour,
-             "matches": matches, "tweets": tweets, "nicknames_used": used, "source": source}
+        if body.kind not in ("daily", "insights"):
+            raise HTTPException(400, "kind must be daily or insights")
+        if body.kind == "insights" and not body.facts:
+            raise HTTPException(400, "insights drafts need facts")
+        tweets, used, source = corny.write_thread(matches, body.day, facts=body.facts)
+        d = {"id": secrets.token_hex(4), "token": secrets.token_urlsafe(16), "kind": body.kind, "day": body.day,
+             "tour": body.tour, "matches": matches, "facts": body.facts, "tweets": tweets, "nicknames_used": used,
+             "source": source}
         store.add_draft(d)
         url = f"{public}/drafts/{d['id']}?t={d['token']}"
-        texted = notify.send_sms(f"🎾 {body.tour.upper()} draft for {body.day} ({len(tweets)} tweets) is ready: {url}")
-        return {"id": d["id"], "url": url, "texted": texted, "tweets": tweets}
+        what = "match insights" if body.kind == "insights" else f"{body.tour.upper()} picks"
+        details = "Draft:\n\n" + "\n\n".join(tweets)
+        if body.oddities:
+            details += "\n\nOdd things spotted (not posted, just for you):\n" + "\n".join(f"- {o}" for o in body.oddities)
+        sent = notify.notify(f"🎾 {what} for {body.day} ready to approve", url, details)
+        return {"id": d["id"], "url": url, "notified": sent, "tweets": tweets}
 
     @app.get("/drafts/{draft_id}", response_class=HTMLResponse)
     def draft_page(draft_id: str, t: str = ""):
@@ -170,7 +187,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         d = check_draft(draft_id, t)
         if d["status"] != "pending":
             raise HTTPException(409, f"draft is {d['status']}")
-        tweets, used, source = corny.write_thread(d["matches"], d["day"], body.direction[:500])
+        tweets, used, source = corny.write_thread(d["matches"], d["day"], body.direction[:500], facts=d["facts"])
         store.update_draft(draft_id, tweets=tweets, nicknames_used=used, source=source)
         return {"tweets": tweets, "message": f"rewritten ({source})", "status": "pending"}
 
@@ -205,16 +222,14 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     # -------------------------------------------------------------- admin
 
-    @app.post("/api/invites", dependencies=[Depends(admin)])
-    def create_invite(body: InviteIn):
-        code = secrets.token_urlsafe(6)
-        store.add_invite(code, body.name[:60])
-        return {"name": body.name, "url": f"{public}/rate/{code}"}
+    @app.get("/api/share-link", dependencies=[Depends(admin)])
+    def share_link():
+        return {"url": f"{public}/rate/{share_code}"}
 
     @app.get("/api/admin/stats", dependencies=[Depends(admin)])
     def stats():
         m = model()
-        return {"votes": store.vote_count(), "votes_in_model": m.n_votes, "top_features": m.top_features(),
+        return {"votes": store.vote_count(), "raters": store.rater_count(), "votes_in_model": m.n_votes, "top_features": m.top_features(),
                 "sample": {"Nadal x Federer": m.sample("Nadal", "Federer", 8, tau=0.7, rng=rng),
                            "Muchova x Alcaraz": m.sample("Muchova", "Alcaraz", 8, tau=0.7, rng=rng)}}
 

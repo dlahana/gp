@@ -15,9 +15,10 @@ CREATE TABLE IF NOT EXISTS rounds (
     shown TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS votes (
     id INTEGER PRIMARY KEY AUTOINCREMENT, round_id INTEGER NOT NULL UNIQUE REFERENCES rounds(id),
-    invite TEXT NOT NULL, chosen INTEGER, created_at TEXT NOT NULL);
+    invite TEXT NOT NULL, rater TEXT, chosen INTEGER, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS drafts (
-    id TEXT PRIMARY KEY, token TEXT NOT NULL, day TEXT NOT NULL, tour TEXT NOT NULL, matches TEXT NOT NULL,
+    id TEXT PRIMARY KEY, token TEXT NOT NULL, kind TEXT NOT NULL, day TEXT NOT NULL, tour TEXT NOT NULL,
+    matches TEXT NOT NULL, facts TEXT,
     tweets TEXT NOT NULL, nicknames_used TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
     tweet_ids TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 """
@@ -55,10 +56,10 @@ class Store:
     def round(self, round_id: int) -> sqlite3.Row | None:
         return self._exec("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
 
-    def add_vote(self, round_id: int, invite: str, chosen: int | None) -> bool:
+    def add_vote(self, round_id: int, invite: str, rater: str, chosen: int | None) -> bool:
         try:
-            self._exec("INSERT INTO votes (round_id, invite, chosen, created_at) VALUES (?, ?, ?, ?)",
-                       (round_id, invite, chosen, now()))
+            self._exec("INSERT INTO votes (round_id, invite, rater, chosen, created_at) VALUES (?, ?, ?, ?, ?)",
+                       (round_id, invite, rater, chosen, now()))
             return True
         except sqlite3.IntegrityError:
             return False   # already voted on this round
@@ -67,23 +68,31 @@ class Store:
         return self._exec("SELECT r.name_a, r.name_b, r.shown, v.chosen, v.invite FROM votes v "
                           "JOIN rounds r ON r.id = v.round_id ORDER BY v.id").fetchall()
 
-    def vote_count(self, invite: str | None = None) -> int:
-        if invite is None:
+    def vote_count(self, rater: str | None = None) -> int:
+        if rater is None:
             return self._exec("SELECT COUNT(*) FROM votes").fetchone()[0]
-        return self._exec("SELECT COUNT(*) FROM votes WHERE invite = ?", (invite,)).fetchone()[0]
+        return self._exec("SELECT COUNT(*) FROM votes WHERE rater = ?", (rater,)).fetchone()[0]
+
+    def rater_count(self) -> int:
+        return self._exec("SELECT COUNT(DISTINCT rater) FROM votes").fetchone()[0]
+
+    def shared_code(self) -> str | None:
+        row = self._exec("SELECT code FROM invites WHERE name = 'shared' ORDER BY created_at LIMIT 1").fetchone()
+        return row[0] if row else None
 
     # drafts
     def add_draft(self, d: dict) -> None:
-        self._exec("INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                   (d["id"], d["token"], d["day"], d["tour"], json.dumps(d["matches"]), json.dumps(d["tweets"]),
-                    json.dumps(d["nicknames_used"]), d["source"], "pending", None, now(), now()))
+        self._exec("INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (d["id"], d["token"], d["kind"], d["day"], d["tour"], json.dumps(d["matches"]),
+                    json.dumps(d.get("facts")), json.dumps(d["tweets"]), json.dumps(d["nicknames_used"]),
+                    d["source"], "pending", None, now(), now()))
 
     def draft(self, draft_id: str) -> dict | None:
         row = self._exec("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
         if row is None:
             return None
         d = dict(row)
-        for k in ("matches", "tweets", "nicknames_used", "tweet_ids"):
+        for k in ("matches", "facts", "tweets", "nicknames_used", "tweet_ids"):
             d[k] = json.loads(d[k]) if d[k] else None
         return d
 
